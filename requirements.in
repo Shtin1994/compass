@@ -1,0 +1,26 @@
+# requirements.in
+
+# --- Core API ---
+fastapi
+uvicorn[standard]
+
+# --- Database & Migrations ---
+sqlalchemy[asyncio]>=2.0.0
+psycopg2-binary   # Синхронный драйвер (для Alembic)
+asyncpg           # <--- ДОБАВЛЕНО: асинхронный драйвер для SQLAlchemy
+alembic
+nest_asyncio
+
+# --- Celery (Background Tasks) ---
+celery
+redis
+
+# --- Telegram Data Collection ---
+telethon
+
+# --- AI Integration ---
+openai
+
+# --- Configuration & Utilities ---
+pydantic-settings
+python-dotenv

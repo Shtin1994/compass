@@ -1,0 +1,147 @@
+# docker-compose.yml
+# Определяем все сервисы (контейнеры), которые составляют наше приложение
+services:
+
+  # 1. База данных PostgreSQL
+  db:
+    image: postgres:15-alpine
+    container_name: insight_compass_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/
+    ports:
+      - "5432:5432"
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - insight_compass_net
+
+  # 2. Брокер сообщений и кэш Redis
+  redis:
+    image: redis:7-alpine
+    container_name: insight_compass_redis
+    # ДОБАВЛЕНО: Healthcheck для Redis.
+    # Команда "redis-cli ping" должна вернуть "PONG". Это гарантирует, что Redis
+    # не просто запущен, а готов принимать команды.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - insight_compass_net
+
+  # 3. Основной API сервис (FastAPI)
+  api:
+    build: .
+    container_name: insight_compass_api
+    command: uvicorn insight_compass.main:app --host 0.0.0.0 --port 8000 --reload
+    volumes:
+      - ./src:/app/src  # Пробрасываем код для "живой" перезагрузки
+      - ./sessions:/app/sessions # Пробрасываем папку с сессиями
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      - ./config:/app/config
+      - ./scripts:/app/scripts
+    ports:
+      - "8000:8000"
+    # ДОБАВЛЕНО: Healthcheck для API
+    # Docker будет периодически выполнять GET-запрос к эндпоинту /health.
+    # Сервис будет считаться "здоровым" (healthy) только после успешного ответа.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    env_file:
+      - .env
+    # ИСПРАВЛЕНИЕ: Добавляем переменную окружения PYTHONPATH.
+    # Это решает проблему ModuleNotFoundError, сообщая Python,
+    # что наши исходники лежат в /app/src, что является стандартом для "src layout".
+    environment:
+      - PYTHONPATH=/app/src
+    depends_on:
+      db:
+        condition: service_healthy
+      # ИЗМЕНЕНО: Теперь мы ждем полной готовности Redis, а не просто его запуска.
+      redis:
+        condition: service_healthy
+    networks:
+      - insight_compass_net
+
+  # 4. Воркер для выполнения фоновых задач
+  celery_worker:
+    build: .
+    container_name: insight_compass_worker
+    command: celery -A insight_compass.celery_app.app worker -l info -P solo
+    volumes:
+      - ./src:/app/src
+      - ./sessions:/app/sessions
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      - ./config:/app/config
+    # ДОБАВЛЕНО: Healthcheck для Celery Worker
+    # Docker будет "пинговать" воркер с помощью встроенной команды celery.
+    # Это гарантирует, что воркер не просто запущен, а готов принимать задачи от брокера.
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A insight_compass.celery_app.app inspect ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    env_file:
+      - .env
+    # ИСПРАВЛЕНИЕ: Воркеру Celery также нужен доступ к модулям проекта.
+    environment:
+      - PYTHONPATH=/app/src
+    depends_on:
+      db:
+        condition: service_healthy
+      # ИЗМЕНЕНО: Теперь мы ждем полной готовности Redis, а не просто его запуска.
+      redis:
+        condition: service_healthy
+    networks:
+      - insight_compass_net
+
+  # 5. Планировщик для периодических задач
+  celery_beat:
+    build: .
+    container_name: insight_compass_beat
+    command: celery -A insight_compass.celery_app.app beat -l info --scheduler celery.beat.PersistentScheduler
+    volumes:
+      - ./src:/app/src
+      # ДОБАВЛЕНО: Volume для сохранения состояния планировщика.
+      # Без этого, при каждом перезапуске контейнера celery_beat, он будет "забывать",
+      # какие задачи и когда он запускал в последний раз.
+      - celery_beat_data:/app
+    env_file:
+      - .env
+    # ИСПРАВЛЕНИЕ: Планировщику Celery Beat также нужен доступ к модулям проекта.
+    environment:
+      - PYTHONPATH=/app/src
+    depends_on:
+      db:
+        condition: service_healthy
+      # ИЗМЕНЕНО: Теперь мы ждем полной готовности Redis, а не просто его запуска.
+      redis:
+        condition: service_healthy
+      # ДОБАВЛЕНО: Зависимость от воркера.
+      # Beat не должен отправлять задачи, пока воркер не будет готов их принять.
+      celery_worker:
+        condition: service_healthy
+    networks:
+      - insight_compass_net
+
+# Декларируем именованный volume для персистентности данных БД
+volumes:
+  postgres_data:
+  # ДОБАВЛЕНО: Volume для файла состояния celery-beat
+  celery_beat_data:
+
+# Декларируем сеть для взаимодействия контейнеров
+networks:
+  insight_compass_net:
+    driver: bridge
