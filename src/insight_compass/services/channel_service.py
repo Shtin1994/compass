@@ -1,99 +1,97 @@
-# --- START OF FILE src/insight_compass/api/services/channel_service.py ---
-
-# src/insight_compass/api/services/channel_service.py
+# --- START OF REVISED FILE src/insight_compass/services/channel_service.py ---
 
 import logging
+from typing import List
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# Убедитесь, что пути к файлам правильные для вашего проекта
 from ..models.telegram_data import Channel
-# ИЗМЕНЕНИЕ: Убираем импорт коллектора, он больше не нужен здесь напрямую.
-# from .collectors.telegram_collector import TelegramCollector
-
-# ИЗМЕНЕНИЕ: Убираем прямой импорт задачи Celery.
-# from ..tasks.data_collection_tasks import task_collect_posts_for_channel
-
-# ДОБАВЛЕНО: Импортируем сервисы, которые будут использоваться.
+from ..db.repositories.channel_repository import ChannelRepository
 from .data_collection_service import DataCollectionService
-# Примечание: TelegramCollector теперь будет передаваться через зависимости в API-слое.
+from .collectors.telegram_collector import TelegramCollector
 
 logger = logging.getLogger(__name__)
 
 class ChannelService:
     """
     Сервисный слой для инкапсуляции бизнес-логики, связанной с каналами.
-    Теперь он делегирует запуск сбора данных соответствующему сервису.
     """
-    # ИЗМЕНЕНИЕ: В конструктор теперь передается DataCollectionService
     def __init__(self, db_session: AsyncSession, data_collection_service: DataCollectionService):
         self.db: AsyncSession = db_session
-        # ИЗМЕНЕНИЕ: Убираем прямое хранение коллектора. Он будет использоваться только в момент вызова.
-        # self.telegram_collector = telegram_collector
+        self.channel_repo = ChannelRepository(self.db)
         self.data_collection_service = data_collection_service
 
-    # ИЗМЕНЕНИЕ: Сигнатура метода теперь принимает TelegramCollector как аргумент
-    async def add_new_channel(self, username: str, telegram_collector) -> Channel:
+    # --- ДОБАВЛЕН НОВЫЙ МЕТОД ---
+    async def get_all_channels(self) -> List[Channel]:
         """
-        Полный цикл добавления нового канала для мониторинга.
-
-        Логика работы:
-        1. Проверка на дубликат по username в БД.
-        2. Запрос информации о канале у Telegram API (через переданный коллектор).
-        3. Проверка на дубликат по полученному telegram_id в БД.
-        4. Сохранение нового канала в БД.
-        5. Делегирование запуска первоначального сбора данных в DataCollectionService.
+        Получает все каналы.
+        Делегирует всю работу репозиторию, т.к. дополнительной бизнес-логики нет.
         """
-        logger.info(f"Сервис: Попытка добавить новый канал: {username}")
+        logger.info("Сервис: Запрос на получение всех каналов")
+        return await self.channel_repo.get_all()
 
-        # 1. Проверяем, нет ли канала с таким username уже в нашей БД
-        stmt_by_name = select(Channel).where(Channel.name == username)
-        if (await self.db.execute(stmt_by_name)).scalar_one_or_none():
+    # --- ДОБАВЛЕН НОВЫЙ МЕТОД ---
+    async def update_channel_status(self, channel_id: int, is_active: bool) -> Channel:
+        """
+        Обновляет статус активности канала.
+        Содержит всю бизнес-логику: поиск, изменение, сохранение и обработка ошибок.
+        """
+        logger.info(f"Сервис: Попытка обновить статус канала ID={channel_id} на is_active={is_active}")
+        # 1. Получаем объект через репозиторий
+        db_channel = await self.channel_repo.get_by_id(channel_id)
+        if not db_channel:
+            # Сервис сам генерирует ошибку, которую поймет API
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Канал не найден")
+        
+        # 2. Применяем бизнес-логику
+        db_channel.is_active = is_active
+        
+        # 3. Управляем транзакцией
+        try:
+            # await self.channel_repo.save(db_channel) # Символический вызов
+            await self.db.commit()
+            await self.db.refresh(db_channel)
+        except Exception:
+            await self.db.rollback()
+            logger.error(f"Ошибка при обновлении статуса канала ID={channel_id}", exc_info=True)
             raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Канал с username '{username}' уже отслеживается."
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Внутренняя ошибка при обновлении статуса канала."
             )
+        
+        logger.info(f"Статус канала '{db_channel.name}' (ID: {db_channel.id}) успешно обновлен.")
+        return db_channel
 
-        # 2. Получаем информацию о канале из Telegram
+    # --- Метод add_new_channel остается без изменений ---
+    async def add_new_channel(self, username: str, telegram_collector: TelegramCollector) -> Channel:
+        # ... (код этого метода остается прежним)
+        logger.info(f"Сервис: Попытка добавить новый канал: {username}")
+        if await self.channel_repo.get_by_name(username):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Канал с username '{username}' уже отслеживается.")
         try:
             channel_info = await telegram_collector.get_channel_info(username)
         except Exception as e:
             logger.error(f"Ошибка получения информации о канале из Telegram: {e}", exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="Ошибка при обращении к Telegram API. Сервис может быть временно недоступен."
-            )
-
-        # 3. Дополнительная проверка на дубликат по telegram_id.
-        stmt_by_tg_id = select(Channel).where(Channel.telegram_id == channel_info['telegram_id'])
-        if (await self.db.execute(stmt_by_tg_id)).scalar_one_or_none():
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Канал с Telegram ID {channel_info['telegram_id']} уже существует в базе."
-            )
-
-        # 4. Создаем и сохраняем новый канал в нашей БД
-        new_channel = Channel(
-            name=channel_info['username'], # Сохраняем каноничный username
-            telegram_id=channel_info['telegram_id'],
-            is_active=True
-        )
-        self.db.add(new_channel)
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Ошибка при обращении к Telegram API.")
+        if await self.channel_repo.get_by_telegram_id(channel_info['telegram_id']):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Канал с Telegram ID {channel_info['telegram_id']} уже существует.")
+        new_channel = Channel(name=channel_info['username'], telegram_id=channel_info['telegram_id'], is_active=True)
         try:
+            await self.channel_repo.add(new_channel)
             await self.db.commit()
-            await self.db.refresh(new_channel)
+        except IntegrityError:
+            await self.db.rollback()
+            logger.warning(f"Конфликт целостности данных при добавлении канала {username}.", exc_info=True)
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Не удалось сохранить канал '{username}' из-за конфликта данных.")
         except Exception:
             await self.db.rollback()
-            logger.error("Ошибка сохранения канала в базу данных.", exc_info=True)
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Внутренняя ошибка при сохранении канала в базу данных."
-            )
-
-        # 5. ИЗМЕНЕНИЕ: Делегируем запуск сбора данных DataCollectionService.
+            logger.error("Непредвиденная ошибка сохранения канала в базу данных.", exc_info=True)
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Внутренняя ошибка при сохранении канала.")
+        await self.db.refresh(new_channel)
         logger.info(f"Канал '{new_channel.name}' (ID: {new_channel.id}) успешно добавлен. Запускаем задачу сбора данных.")
         await self.data_collection_service.trigger_posts_collection(channel_id=new_channel.id)
-
         return new_channel
 
-# --- END OF FILE src/insight_compass/api/services/channel_service.py ---
+# --- END OF REVISED FILE src/insight_compass/services/channel_service.py ---

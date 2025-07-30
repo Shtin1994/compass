@@ -1,14 +1,22 @@
 // --- START OF FILE frontend/src/lib/api.ts ---
 
+// ==============================================================================
+// КОММЕНТАРИЙ ДЛЯ ПРОГРАММИСТА:
+// Этот файл — наш централизованный API-клиент. Он является "мостом" между
+// фронтенд-компонентами и бэкенд-сервером.
+// Его задачи:
+// 1. Определять типы данных, которыми мы обмениваемся с сервером.
+// 2. Предоставлять функции для выполнения всех необходимых API-запросов.
+// 3. Обрабатывать ответы и ошибки в одном месте (handleResponse).
+// Централизация API-логики здесь упрощает тестирование и дальнейшую поддержку.
+// ==============================================================================
+
 import { QueryClient } from '@tanstack/react-query';
 import { Channel } from '@/types/channel';
 import { PaginatedInsightsResponse } from '@/types/insight';
 import { DynamicsDataPoint, SentimentDataPoint, TopicDataPoint } from '@/types/analytics';
-import { PostDetailsData, PaginatedPostsResponse } from '@/types/data';
-// ИЗМЕНЕНИЕ: Добавлен импорт типа для комментария
-import { Comment } from '@/types/comment';
+import { PostDetailsData, PaginatedPostsResponse, PaginatedCommentsResponse } from '@/types/data';
 
-// Убеждаемся, что переменная окружения доступна
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL;
 if (!API_BASE_URL) {
     throw new Error("Переменная окружения NEXT_PUBLIC_API_BASE_URL не установлена!");
@@ -16,24 +24,24 @@ if (!API_BASE_URL) {
 
 export const queryClient = new QueryClient();
 
-/**
- * Общая функция-обработчик ответа от API.
- * @param response - Объект Response от fetch.
- * @returns - Данные в формате JSON или объект с сообщением.
- * @throws {Error} - Выбрасывает ошибку с текстом из ответа API, если запрос неуспешен.
- */
+// Универсальный обработчик ответов API для уменьшения дублирования кода
 const handleResponse = async (response: Response) => {
-  // Пытаемся получить детали ошибки из тела ответа в любом случае
   const responseBody = await response.json().catch(() => ({ detail: response.statusText }));
-
   if (!response.ok) {
-    // Создаем осмысленное сообщение об ошибке
     const errorMessage = responseBody.detail || `Произошла ошибка, статус: ${response.status}`;
     throw new Error(errorMessage);
   }
-
-  // Для успешных ответов (включая 202 Accepted) возвращаем тело, т.к. бэкенд шлет { message: "..." }
   return responseBody;
+};
+
+// ДОБАВЛЕНО: Этот тип был определен в предыдущих шагах, но важно
+// убедиться, что он здесь есть. Он описывает структуру тела запроса
+// для сбора постов и является зеркалом Pydantic-схемы на бэкенде.
+export type PostsCollectionRequestBody = {
+  mode: 'get_new' | 'historical' | 'initial';
+  date_from?: string | null;
+  date_to?: string | null;
+  limit?: number | null;
 };
 
 export const api = {
@@ -61,9 +69,22 @@ export const api = {
     return handleResponse(response);
   },
 
-  triggerCollection: async (id: number): Promise<{ message: string }> => {
-    const response = await fetch(`${API_BASE_URL}/channels/${id}/collect`, {
+  // ==============================================================================
+  // ИСПРАВЛЕНИЕ ОШИБКИ `[object Object]`
+  // ==============================================================================
+  // ЗАМЕНЕНО: Старая версия функции принимала `id: number`. Новая версия
+  // принимает один объект и использует деструктуризацию `{ id, body }`.
+  // ПОЧЕМУ: Компонент `page.tsx` теперь вызывает эту функцию, передавая ей
+  // один сложный объект: `{ id: 123, body: { mode: '...', ... } }`.
+  // Старая сигнатура пыталась использовать весь этот объект как ID, что
+  // приводило к его преобразованию в строку "[object Object]" в URL.
+  // Новая сигнатура правильно "распаковывает" объект, извлекая `id` (число)
+  // для URL и `body` (объект) для тела запроса.
+  triggerChannelPostsCollection: async ({ id, body }: { id: number; body: PostsCollectionRequestBody }): Promise<{ message: string }> => {
+    const response = await fetch(`${API_BASE_URL}/channels/${id}/collect-posts`, {
       method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
     });
     return handleResponse(response);
   },
@@ -96,23 +117,20 @@ export const api = {
     return handleResponse(response);
   },
   
-  // НОВАЯ ФУНКЦИЯ: Загрузка комментариев для поста
   getPostComments: async (params: { 
     postId: number; 
     page?: number; 
     size?: number 
-  }): Promise<{ items: Comment[] }> => {
+  }): Promise<PaginatedCommentsResponse> => {
     const query = new URLSearchParams({
       page: String(params.page || 1),
       size: String(params.size || 20),
     }).toString();
-    // Эндпоинт, который мы ранее создали на бэкенде
     const response = await fetch(`${API_BASE_URL}/posts/${params.postId}/comments?${query}`);
     return handleResponse(response);
   },
 
   // --- Действия с постами ---
-
   triggerPostAnalysis: async (postId: number): Promise<{ message: string }> => {
     const response = await fetch(`${API_BASE_URL}/posts/${postId}/analyze`, {
         method: 'POST',
@@ -152,4 +170,5 @@ export const api = {
     return handleResponse(response);
   },
 };
-// --- END OF FILE frontend/src/lib/api.ts ---
+
+// --- END OF REVISED FILE frontend/src/lib/api.ts ---

@@ -1,6 +1,14 @@
-# --- START OF FILE src/insight_compass/api/services/analytics_service.py ---
+# --- START OF FILE src/insight_compass/services/analytics_service.py ---
 
-# src/insight_compass/api/services/analytics_service.py
+# src/insight_compass/services/analytics_service.py
+
+# ==============================================================================
+# КОММЕНТАРИЙ ДЛЯ ПРОГРАММИСТА:
+# Этот файл содержит сервисный слой для всей логики, связанной с аналитикой:
+# - Запуск фоновых задач для AI-анализа.
+# - Подготовка и агрегация данных для дашбордов (динамика, тональность, темы).
+# Он инкапсулирует сложные SQL-запросы и взаимодействие с системой очередей (Celery).
+# ==============================================================================
 
 import logging
 from datetime import date
@@ -11,7 +19,12 @@ from sqlalchemy import select, func, desc, cast, Date, Integer
 from sqlalchemy.dialects.postgresql import JSONB
 
 # ИЗМЕНЕНИЕ: Убираем импорт `app` с верхнего уровня модуля.
-# from ...celery_app import app
+# ПОЧЕМУ: Импорт на уровне модуля приводил к циклической зависимости:
+# service -> celery_app -> tasks -> service.
+# Python не мог разрешить этот цикл при запуске, что вызывало ошибку
+# "attempted relative import beyond top-level package".
+# from insight_compass.celery_app import app # <-- ЭТА СТРОКА БЫЛА ПРОБЛЕМОЙ
+
 from ..models.telegram_data import Post, Comment
 from ..models.ai_analysis import PostAnalysis
 from ..schemas import ui_schemas
@@ -30,18 +43,25 @@ class AnalyticsService:
         Проверяет существование поста и ставит задачу на его анализ в очередь.
         """
         # ИЗМЕНЕНИЕ: Отложенный импорт для разрыва цикла зависимостей.
-        from ...celery_app import app
+        # ПОЧЕМУ: Импорт `app` перенесен внутрь метода. Он выполняется только в момент
+        # вызова этого метода, когда все модули уже загружены. Это стандартный
+        # и безопасный способ разорвать циклический импорт в Python.
+        from insight_compass.celery_app import app
         
+        # Проверяем, существует ли пост, для которого запускается анализ
         post = await self.db.get(Post, post_id)
         if not post:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Пост с ID {post_id} не найден.")
 
+        # Проверяем, не был ли анализ уже сделан или запущен ранее.
+        # Это предотвращает дублирование дорогостоящих AI-запросов.
         existing_analysis = await self.db.execute(
             select(PostAnalysis.id).where(PostAnalysis.post_id == post_id)
         )
         if existing_analysis.scalar_one_or_none():
              raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=f"Анализ для поста ID={post_id} уже существует или находится в обработке.")
 
+        # Если все проверки пройдены, отправляем задачу в очередь Celery.
         app.send_task(
             name="insight_compass.tasks.analyze_single_post",
             kwargs={'post_id': post.id}
@@ -141,4 +161,4 @@ class AnalyticsService:
             for row in result.all()
         ]
 
-# --- END OF FILE src/insight_compass/api/services/analytics_service.py ---
+# --- END OF FILE src/insight_compass/services/analytics_service.py ---
