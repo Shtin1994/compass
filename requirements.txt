@@ -102,6 +102,8 @@ python-dotenv==1.1.1
     #   -r requirements.in
     #   pydantic-settings
     #   uvicorn
+python-json-logger==3.3.0
+    # via -r requirements.in
 pyyaml==6.0.2
     # via uvicorn
 redis==6.2.0

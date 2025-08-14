@@ -2,15 +2,17 @@
 
 import asyncio
 import logging
+import time
 
-# ДОБАВЛЕНО: Импортируем специфичные ошибки от OpenAI (или любого другого LLM-провайдера),
-# на которые безопасно делать retry. Это ошибки, связанные с сетью, временной недоступностью или перегрузкой API.
+# ИЗМЕНЕНО: Импортируем специфичные ошибки от OpenAI для `autoretry_for`.
+# Это ошибки, связанные с сетью, временной недоступностью или перегрузкой API.
 from openai import RateLimitError, APITimeoutError, APIConnectionError, InternalServerError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import selectinload
 
 from ..celery_app import app
+# ДОБАВЛЕНО: Импорт настроек для использования в параметрах задачи.
 from ..core.config import settings
 from ..core.dependencies import get_service_provider
 from ..db.session import sessionmanager
@@ -19,20 +21,24 @@ from ..models.telegram_data import Post
 
 logger = logging.getLogger(__name__)
 
+# ДОБАВЛЕНО: Копируем стандартный блок настроек из data_collection_tasks.py
+# для унификации и повышения надежности.
+TASK_BASE_SETTINGS = {
+    "bind": True,
+    "acks_late": True,
+    "default_retry_delay": settings.CELERY_RETRY_DELAY,
+    "max_retries": settings.CELERY_MAX_RETRIES,
+}
 
-# ИСПРАВЛЕНО: Уточнили список ошибок для авто-повтора.
-# Мы больше не используем `Exception`, а указываем только временные ошибки API.
-# Это предотвращает бесконечные повторы на логических ошибках (например, если пост не найден)
-# или на ошибках в данных (неверный JSON от LLM).
+# ИЗМЕНЕНО: Применяем стандартные настройки и добавляем специфичные для этой задачи.
 @app.task(
     name="insight_compass.tasks.analyze_single_post",
-    bind=True,
-    max_retries=settings.TASK_DEFAULT_RETRIES,
-    default_retry_delay=settings.TASK_DEFAULT_RETRY_DELAY_SECONDS,
+    **TASK_BASE_SETTINGS,
+    # Указываем список временных ошибок, при которых Celery должен автоматически
+    # перезапустить задачу. Это гораздо надежнее, чем ловить общее `Exception`.
     autoretry_for=(RateLimitError, APITimeoutError, APIConnectionError, InternalServerError),
-    retry_backoff=True,
-    # ДОБАВЛЕНО: Увеличиваем время ожидания завершения задачи.
-    # Анализ с помощью LLM может занимать много времени, особенно с комментариями.
+    retry_backoff=True, # Включаем экспоненциальную задержку между повторами.
+    # Увеличиваем время ожидания, так как анализ LLM может быть долгим.
     soft_time_limit=300,  # 5 минут (задача получит SoftTimeLimitExceeded)
     time_limit=360        # 6 минут (worker будет принудительно завершен)
 )
@@ -41,68 +47,41 @@ def task_analyze_single_post(self, post_id: int):
     Выполняет полный AI-анализ для одного поста и его комментариев,
     и сохраняет результат в базу данных.
     """
-    logger.info(f"[AI WORKER] Starting analysis for post_id={post_id}")
+    start_time = time.monotonic()
+    logger.info(f"[AI WORKER] Запуск анализа для поста DB_ID={post_id}")
 
-    # ИСПРАВЛЕНО: Убрали внешний `try...except Exception` и ручной вызов `self.retry`.
-    # Логика авто-повтора теперь полностью делегирована декоратору `@app.task`,
-    # что делает код чище и устраняет дублирование.
-    # Внутренняя логика теперь сама обрабатывает ожидаемые "не-retry" ошибки (post not found и т.д.).
+    # Логика авто-повтора теперь полностью делегирована декоратору.
+    # Внутренняя логика обрабатывает только те ошибки, которые НЕ требуют повтора.
     async def _run():
-        post_text: str
-        comments_text: list[str]
-        
         # --- Шаг 1: Получаем пост и его комментарии из нашей БД ---
         async with sessionmanager.session() as db:
-            # Проверяем, не был ли этот пост уже проанализирован
-            # ДОБАВЛЕНО: Эта проверка делает задачу идемпотентной. Если задача перезапустится
-            # после успешного сохранения, она просто завершится, не делая лишней работы.
-            stmt_exist = select(PostAnalysis.id).where(PostAnalysis.post_id == post_id)
-            if (await db.execute(stmt_exist)).scalar_one_or_none():
-                logger.warning(f"Analysis for post_id={post_id} already exists. Skipping.")
+            # Проверка на идемпотентность: не анализируем то, что уже проанализировано.
+            if (await db.execute(select(PostAnalysis.id).where(PostAnalysis.post_id == post_id))).scalar_one_or_none():
+                logger.warning(f"Анализ для поста DB_ID={post_id} уже существует. Пропуск.")
                 return
 
-            # Загружаем пост и СРАЗУ ЖЕ все связанные с ним комментарии
-            # `selectinload` делает это одним дополнительным запросом, очень эффективно.
-            stmt_post = select(Post).where(Post.id == post_id).options(
-                selectinload(Post.comments)
-            )
+            # Загружаем пост и СРАЗУ ЖЕ все связанные с ним комментарии.
+            stmt_post = select(Post).where(Post.id == post_id).options(selectinload(Post.comments))
             post = (await db.execute(stmt_post)).scalar_one_or_none()
 
             if not post:
-                # ИСПРАВЛЕНО: Это перманентная ошибка. Повторять ее бессмысленно.
-                # Просто логируем и выходим. Задача будет помечена как успешная (т.к. нет Exception),
-                # что правильно - мы обработали этот случай.
-                logger.error(f"Post with id={post_id} not found in DB. Aborting analysis.")
-                return
+                logger.error(f"Пост с ID={post_id} не найден в БД. Анализ невозможен.")
+                return # Это не временная ошибка, повторять бессмысленно.
             
-            # Собираем тексты для передачи в LLM
             post_text = post.text or ""
             comments_text = [c.text for c in post.comments if c.text]
 
         # --- Шаг 2: Выполняем AI-анализ ---
-        # Если здесь произойдет одна из ошибок, указанных в `autoretry_for`,
-        # Celery автоматически перехватит ее и перезапустит всю задачу.
         async with get_service_provider() as services:
-            # ИЗМЕНЕНО: Вызываем обобщенный анализатор, а не конкретный `openai_analyzer`.
-            # Это делает задачу независимой от конкретной реализации LLM.
-            analysis_result = await services.llm_analyzer.get_analysis(
-                post_text=post_text,
-                comments=comments_text
-            )
+            analysis_result = await services.llm_analyzer.get_analysis(post_text=post_text, comments=comments_text)
 
         # --- Шаг 3: Сохраняем результат в БД ---
-        # ДОБАВЛЕНО: Более надежная проверка результата от LLM.
         if not isinstance(analysis_result, dict) or "summary" not in analysis_result:
-            logger.error(f"AI analysis for post_id={post_id} returned invalid data or structure. Aborting.")
-            # Мы не делаем retry, если LLM вернула некорректный JSON, это не временная ошибка.
-            return
+            logger.error(f"Анализ для поста DB_ID={post_id} вернул некорректные данные. Пропуск сохранения.")
+            return # Некорректный ответ от LLM - не повод для retry.
             
         async with sessionmanager.session() as db:
-            # ДОБАВЛЕНО: Получаем имя модели из результата анализа, если оно там есть.
-            # Это более надежно, чем использовать значение из настроек, так как
-            # анализатор может использовать разные модели в зависимости от логики.
-            model_used = analysis_result.get("model_used", "unknown")
-
+            model_used = analysis_result.get("model_used", settings.OPENAI_DEFAULT_MODEL_FOR_TASKS)
             new_analysis = PostAnalysis(
                 post_id=post_id,
                 summary=analysis_result.get("summary"),
@@ -113,14 +92,18 @@ def task_analyze_single_post(self, post_id: int):
             db.add(new_analysis)
             try:
                 await db.commit()
-                logger.info(f"Successfully saved analysis for post_id={post_id} using model {model_used}")
+                logger.info(f"Успешно сохранен анализ для поста DB_ID={post_id} (модель: {model_used})")
             except IntegrityError:
-                # На случай, если две задачи на анализ запустились одновременно (race condition)
                 await db.rollback()
-                logger.warning(f"Analysis for post_id={post_id} was created by a parallel task. Skipping.")
+                logger.warning(f"Анализ для поста DB_ID={post_id} был создан параллельной задачей. Пропуск.")
 
-    # Эта конструкция запускает асинхронный код внутри синхронной задачи Celery.
-    asyncio.run(_run())
-
-
-# --- END OF FILE src/insight_compass/tasks/ai_analysis_tasks.py ---
+    try:
+        asyncio.run(_run())
+    except Exception as e:
+        # Этот блок теперь будет ловить только НЕ временные ошибки,
+        # которые не были обработаны внутри _run()
+        logger.error(f"Критическая необработанная ошибка при анализе поста {post_id}: {e}", exc_info=True)
+        # Мы не делаем retry здесь, так как все retryable ошибки обрабатываются декоратором.
+    finally:
+        processing_time = time.monotonic() - start_time
+        logger.info(f"[AI WORKER] Завершено для поста DB_ID={post_id}. Время выполнения: {processing_time:.2f} сек.")

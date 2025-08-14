@@ -1,0 +1,59 @@
+# --- .env Файл ---
+# Файл конфигурации для локальной разработки.
+# 🚨 ВНИМАНИЕ: Этот файл содержит секреты и не должен попадать в публичные репозитории!
+# Добавьте его в .gitignore
+
+# --- Application Environment & Logging ---
+# Указывает окружение. Варианты: "dev", "prod". Влияет на загрузку .env.prod и поведение FastAPI.
+ENVIRONMENT=dev
+# Уровень логирования. Варианты: "DEBUG", "INFO", "WARNING", "ERROR".
+LOG_LEVEL=INFO
+
+# --- Web Server Settings ---
+# Разрешенные домены для CORS-запросов, разделенные запятой.
+# Важно для подключения frontend-приложения.
+BACKEND_CORS_ORIGINS="http://localhost:3000,http://localhost"
+
+# --- PostgreSQL Configuration ---
+POSTGRES_USER=user
+POSTGRES_PASSWORD=password
+POSTGRES_DB=insight_compass_db
+POSTGRES_HOST=db
+POSTGRES_PORT=5432
+
+# --- Redis Configuration ---
+REDIS_HOST=redis
+REDIS_PORT=6379
+REDIS_DB_BROKER=0
+REDIS_DB_BACKEND=1
+
+# --- Telegram API Credentials ---
+TELEGRAM_API_ID=28124002
+TELEGRAM_API_HASH=d7586f457608cd4770e30c28287c2738
+TELEGRAM_BOT_TOKEN=7971831788:AAHsrq3nwdIqxghicOMin62CsO6s7VYkadU
+TELEGRAM_SESSION_STRING=1ApWapzMBu8LqRNysqaHpSxUcMv_0yTcnuHkEzq5KfhqI8nQxV0a61USigQ3x1Cz6tLgHwYa-oCwxnDJIY2zwQhLGHSFWx9bZAVqJJMPASC5yH3jH0dPkCJDMQUHcUJuSbxArS6fcB6VlRsjej94BbafAoWhrgjJcMeYpkQHkrSuoj5c8OIB7nQAYZ89J58XE-RLNmHut8nknb5XHy_p0WGUuvzsJGxrQEHRFYYE1Dk2CvZr5zTT60B9Z2aAIypyzN6qs21nB6eR1WIdHdcCzOS4hnW_eM3QhFlXlmtid-9M7Fdlhh7ltalzfVlCDHgBlU2pNjJInzSfwFrSM3HApYjawvChXqyo=
+
+# --- LLM Provider ---
+LLM_PROVIDER="openai"
+
+# --- OpenAI Settings ---
+OPENAI_API_KEY=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
+
+# --- LLM Model Settings ---
+OPENAI_DEFAULT_MODEL="gpt-3.5-turbo"
+OPENAI_DEFAULT_MODEL_FOR_TASKS="gpt-4o-mini"
+OPENAI_TIMEOUT_SECONDS=60.0
+LLM_MAX_PROMPT_LENGTH=3800
+
+# --- Data Collection Settings ---
+POST_FETCH_LIMIT=50
+COMMENT_FETCH_LIMIT=100
+
+# --- Celery Task Settings ---
+TASK_DEFAULT_RETRIES=3
+TASK_DEFAULT_RETRY_DELAY_SECONDS=300
+TASK_POST_BATCH_SIZE=50
+
+# --- Outbox Pattern Settings ---
+OUTBOX_BATCH_SIZE=100
+OUTBOX_CLEANUP_THRESHOLD_DAYS=7

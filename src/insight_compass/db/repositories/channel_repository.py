@@ -1,12 +1,12 @@
-# --- START OF REVISED FILE src/insight_compass/db/repositories/channel_repository.py ---
+# src/insight_compass/db/repositories/channel_repository.py
 
 from typing import List, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
-# Убедитесь, что путь к модели правильный для вашего проекта
 from ...models.telegram_data import Channel
+from ...schemas.ui_schemas import ChannelCreateInternal
+
 
 class ChannelRepository:
     """
@@ -37,19 +37,22 @@ class ChannelRepository:
         result = await self.db.execute(stmt)
         return list(result.scalars().all())
 
-    async def add(self, channel: Channel) -> None:
-        """Добавляет новый объект канала в текущую сессию базы данных."""
-        self.db.add(channel)
+    # КОММЕНТАРИЙ: Этот метод НЕ ТРЕБУЕТ ИЗМЕНЕНИЙ.
+    # Он идеально спроектирован для работы с Pydantic-схемой. Когда мы исправили
+    # схему `ChannelCreateInternal`, этот метод автоматически начал работать правильно.
+    # Он берет схему, превращает ее в словарь (`.model_dump()`) и распаковывает
+    # этот словарь в конструктор модели `Channel`. Так как имена полей теперь совпадают,
+    # ошибки больше нет.
+    async def create(self, channel_in: ChannelCreateInternal) -> Channel:
+        """Создает новый объект канала на основе внутренней Pydantic-схемы."""
+        new_channel = Channel(**channel_in.model_dump())
+        self.db.add(new_channel)
+        await self.db.flush()
+        return new_channel
 
-    # ДОБАВЛЕНО: Универсальный метод для сохранения изменений.
-    # Так как commit и refresh управляются сервисом, репозиторию больше ничего не нужно делать.
-    # Этот метод здесь для полноты картины и если понадобится более сложная логика сохранения в будущем.
-    # В текущей реализации даже вызов `repo.save()` не обязателен, т.к. SQLAlchemy отслеживает изменения
-    # в объектах, привязанных к сессии. Но явное указание намерения - хорошая практика.
     async def save(self, channel: Channel) -> None:
-        """Сохраняет изменения в объекте канала (символический метод)."""
-        # С асинхронной сессией достаточно просто изменить объект,
-        # а затем вызвать commit на уровне сервиса.
-        self.db.add(channel) # add также работает для обновления существующих объектов в сессии
-
-# --- END OF REVISED FILE src/insight_compass/db/repositories/channel_repository.py ---
+        """Сохраняет изменения в существующем объекте канала."""
+        # Для обновления существующего объекта SQLAlchemy достаточно изменить его атрибуты.
+        # `add` здесь используется для того, чтобы убедиться, что объект отслеживается сессией.
+        self.db.add(channel)
+        await self.db.flush()
